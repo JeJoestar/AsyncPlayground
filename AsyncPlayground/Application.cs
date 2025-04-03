@@ -8,6 +8,7 @@ namespace AsyncPlayground
     {
         private Dictionary<string, int> _cache = new() { ["x"] = 42 };
         private readonly ApplicationContext _context;
+        private readonly CancellationTokenSource _cancellationTokenSource = new();
 
         public Application(ApplicationContext context)
         {
@@ -16,7 +17,7 @@ namespace AsyncPlayground
 
         public async Task Go()
         {
-            await Task1_HelloWorldAsync();
+            Task1_HelloWorld();
             await Task2_ReturnTaskToAddEmployeeAsync();
             await Task3_Exception();
             await Task4_ReturnEmployees();
@@ -26,21 +27,27 @@ namespace AsyncPlayground
             Task7_2_CorrectBlocking();
             Task8_FireAndForget();
             await Task9_GetCachedValueAsync();
+
+            Task.Delay(10000).ContinueWith(t =>
+            {
+                _cancellationTokenSource.Cancel();
+            });
             await Task10_Cancellation();
+
         }
 
         // Task 1. Unnecessary State Machine involved.
-        private async Task Task1_HelloWorldAsync()
+        private void Task1_HelloWorld()
         {
             Console.WriteLine("Hello World!");
         }
 
         // Task 2. Everything looks fine... or does it?
-        private Task<int> Task2_ReturnTaskToAddEmployeeAsync()
+        private async Task<int> Task2_ReturnTaskToAddEmployeeAsync()
         {
             try
             {
-                return CreateEmployee();
+                return await CreateEmployee();
             }
             catch (Exception ex)
             {
@@ -64,20 +71,20 @@ namespace AsyncPlayground
         // Task 3. We should see the exception message in the output
         private async Task Task3_Exception()
         {
-            CatchTheException();
+            await CatchTheExceptionAsync();
         }
 
-        private async void AsyncVoidMethodThrowsException()
+        private async Task AsyncVoidMethodThrowsException()
         {
             await Task.Delay(100);
             throw new Exception("Hmmm, something went wrong!");
         }
 
-        public void CatchTheException()
+        public async Task CatchTheExceptionAsync()
         {
             try
             {
-                AsyncVoidMethodThrowsException();
+                await AsyncVoidMethodThrowsException();
             }
             catch (Exception ex)
             {
@@ -91,9 +98,9 @@ namespace AsyncPlayground
             return await ReturnEmployeesListAsync();
         }
 
-        private async Task<List<Employee>> ReturnEmployeesListAsync()
+        private Task<List<Employee>> ReturnEmployeesListAsync()
         {
-            return await _context.Employees.ToListAsync();
+            return _context.Employees.ToListAsync();
         }
 
         // Task 5. Avoid early disposal
@@ -103,36 +110,41 @@ namespace AsyncPlayground
             Console.WriteLine("Task5 " + result);
         }
 
-        public Task<string> ReturnTaskToReadFileEarlyDisposeAsync()
+        public async Task<string> ReturnTaskToReadFileEarlyDisposeAsync()
         {
             using (var reader = new StreamReader("config.json"))
             {
-                return reader.ReadToEndAsync();
+                return await reader.ReadToEndAsync();
             }
         }
 
         // Task 6. Optimize multiple calls that are not dependent on each other
         private async Task<List<Employee>> Task6_MultipleCalls()
         {
-            var employeesFromDepartment1 = await GetEmployeesFromDepartmentAsync("IT");
-            var employeesFromDepartment2 = await GetEmployeesFromDepartmentAsync("Financial");
-            var employeesFromDepartment3 = await GetEmployeesFromDepartmentAsync("BI");
+            var employeesFromDepartment1 = GetEmployeesFromDepartmentAsync("IT");
+            var employeesFromDepartment2 = GetEmployeesFromDepartmentAsync("Financial");
+            var employeesFromDepartment3 = GetEmployeesFromDepartmentAsync("BI");
+
+            var task = Task.WhenEach(employeesFromDepartment1, employeesFromDepartment2, employeesFromDepartment3);
 
             var result = new List<Employee>();
-            result.AddRange(employeesFromDepartment1.Concat(employeesFromDepartment2).Concat(employeesFromDepartment3));
+            await foreach (var employeeTask in task)
+            {
+                result.AddRange(await employeeTask);
+            }
 
             return result;
         }
 
-        private async Task<List<Employee>> GetEmployeesFromDepartmentAsync(string department)
+        private Task<List<Employee>> GetEmployeesFromDepartmentAsync(string department)
         {
-            return await _context.Employees.Where(e => e.Department == department).ToListAsync();
+            return _context.Employees.Where(e => e.Department == department).ToListAsync();
         }
 
         // Task 7.1. I just don't like AggregateExceptions
         private string Task7_1_GetFirstEmployeeName()
         {
-            return GetFirstEmployeeNameAsync().Result;
+            return GetFirstEmployeeNameAsync().GetAwaiter().GetResult();
         }
 
         private async Task<string> GetFirstEmployeeNameAsync()
@@ -143,7 +155,7 @@ namespace AsyncPlayground
         // Task 7.2. I just don't like AggregateExceptions
         private void Task7_2_CorrectBlocking()
         {
-            LongImportantJobThatShouldBeAwaited().Wait();
+            LongImportantJobThatShouldBeAwaited().GetAwaiter().GetResult();
         }
 
         private async Task LongImportantJobThatShouldBeAwaited()
@@ -154,7 +166,14 @@ namespace AsyncPlayground
         // Task 8. Avoid Fire-and-Forget Without Logging or Handling
         private void Task8_FireAndForget()
         {
-            DoBackgroundWorkAsync();
+            try
+            {
+                DoBackgroundWorkAsync().GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine(ex.Message);
+            }
         }
 
         private async Task DoBackgroundWorkAsync()
@@ -165,7 +184,7 @@ namespace AsyncPlayground
         }
 
         // Task 9: This method is being called really often. Try to optimize its memory consumption.
-        public async Task<int> Task9_GetCachedValueAsync()
+        public async ValueTask<int> Task9_GetCachedValueAsync()
         {
             if (_cache.TryGetValue("x", out var value))
                 return value;
@@ -182,15 +201,23 @@ namespace AsyncPlayground
         // Task 10. Provide cancellation mechanism for the long-running task
         private async Task Task10_Cancellation()
         {
-            await LongRunningTaskAsync();
+            await LongRunningTaskAsync(_cancellationTokenSource.Token);
         }
         
-        public async Task LongRunningTaskAsync()
+        public async Task LongRunningTaskAsync(CancellationToken cancellationToken = default)
         {
             for (int i = 0; i < 100; i++)
             {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    Console.WriteLine("Task cancelled.");
+                    cancellationToken.ThrowIfCancellationRequested();
+                }
+
                 //Simulate an async call that takes some time to complete
                 await Task.Delay(1000);
+
+                Console.WriteLine($"Task is running... {i + 1}% completed");
             }
         }
     }
